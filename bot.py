@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # ================== CONFIGURATION ==================
 BOT_TOKEN = "9257042993:AAH3U-vStUBysdrGVixFakT0AN5cCcXvLTE"
-DB_FILE = "lobby.db"
+DB_FILE = '/data/lobby.db"
 ADMIN_ID = "7651976653"
 WELCOME_IMAGE = "https://placehold.co/600x400/png?text=Welcome+to+Media+Lobby"
 
