@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import random
 import time
@@ -23,15 +24,11 @@ ADMIN_ID = "7651976653"
 WELCOME_IMAGE = "https://placehold.co/600x400/png?text=Welcome+to+Media+Lobby"
 
 NAME_EMOJIS = ["🦊", "🐯", "🐶", "🐼", "🦁", "🐰", "🦄", "🐉", "🦉", "🐙", "🦅", "🐺"]
-INACTIVITY_LIMIT_SECONDS = 86400  # 24 hours
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Telegram ki 30 msg/sec limit ke andar ultra-fast parallel sending
 broadcast_semaphore = asyncio.Semaphore(25)
-
-# ================== RAM STORAGE ==================
 ALBUMS = {}
 
 # ================== ULTRA-FAST ASYNC SQLITE (WAL MODE) ==================
@@ -58,6 +55,7 @@ def get_honor(level: int) -> str:
     return ranks.get(level, "Legend 💎")
 
 async def ensure_user(user_id_str: str, first_name: str):
+    safe_name = html.escape(first_name or "Anonymous")
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
             "SELECT alias, media_count, level, honor, banned, streak_count, last_active_date FROM users WHERE user_id=?",
@@ -66,7 +64,7 @@ async def ensure_user(user_id_str: str, first_name: str):
             user = await cursor.fetchone()
 
         if not user:
-            alias = f"{random.choice(NAME_EMOJIS)} {first_name}"
+            alias = f"{random.choice(NAME_EMOJIS)} {safe_name}"
             current_time = time.time()
             await db.execute(
                 "INSERT INTO users (user_id, alias, media_count, level, honor, banned, last_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -77,7 +75,7 @@ async def ensure_user(user_id_str: str, first_name: str):
             logging.info(f"New User Registered: {alias}")
 
     return {
-        "alias": user[0], "media_count": user[1], "level": user[2],
+        "alias": html.escape(user[0]), "media_count": user[1], "level": user[2],
         "honor": user[3], "banned": bool(user[4]),
         "streak_count": user[5], "last_active_date": user[6]
     }
@@ -135,9 +133,11 @@ async def admin_action(user_id_str: str, action: str):
             await db.execute("UPDATE users SET banned=1 WHERE user_id=?", (user_id_str,))
         elif action == "unban":
             await db.execute("UPDATE users SET banned=0, last_active=? WHERE user_id=?", (time.time(), user_id_str))
+        elif action == "unbanall":
+            await db.execute("UPDATE users SET banned=0, last_active=?", (time.time(),))
         await db.commit()
 
-# ================== ULTRA-FAST ASYNC BROADCASTER ==================
+# ================== ULTRA-FAST ASYNC BROADCASTER (NO AUTO-BAN) ==================
 async def safe_send(chat_id: int, func, **kwargs):
     async with broadcast_semaphore:
         for _ in range(3):
@@ -147,10 +147,7 @@ async def safe_send(chat_id: int, func, **kwargs):
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after)
             except (TelegramForbiddenError, TelegramBadRequest):
-                # User ne bot block kar diya -> mark banned
-                async with aiosqlite.connect(DB_FILE) as db:
-                    await db.execute("UPDATE users SET banned=1 WHERE user_id=?", (str(chat_id),))
-                    await db.commit()
+                # Kisi bhi error par user ko ban nahi karega, sirf skip kar dega
                 break
             except Exception as e:
                 logging.error(f"Send Error ({chat_id}): {e}")
@@ -168,7 +165,6 @@ async def broadcast_to_lobby(sender_id_str: str, func, **kwargs):
 
         tasks.append(safe_send(int(u_id), func, **kwargs))
 
-        # Har 25 messages ek sath fire honge + 1s safe gap
         if len(tasks) >= 25:
             await asyncio.gather(*tasks)
             tasks = []
@@ -194,7 +190,7 @@ async def broadcast_album(group_id: str, sender_id_str: str, header_text: str):
     await broadcast_to_lobby(sender_id_str, bot.send_media_group, media=media_group)
 
 # ================== ADMIN PANEL COMMANDS ==================
-@dp.message(Command("users", "ban", "unban", "broadcast", "pin"))
+@dp.message(Command("users", "ban", "unban", "unbanall", "broadcast", "pin"))
 async def admin_controls(message: Message):
     if str(message.from_user.id) != ADMIN_ID:
         return
@@ -209,6 +205,10 @@ async def admin_controls(message: Message):
             f"👥 Total Users: {t}\n✅ Active: {a}\n🚫 Banned: {b}\n━━━━━━━━━━━━━━━━━━"
         )
         return await message.reply(text)
+
+    if command == "/unbanall":
+        await admin_action("", "unbanall")
+        return await message.reply("✅ All banned users have been unbanned!")
 
     if command in ["/ban", "/unban"]:
         if len(parts) < 2:
@@ -227,7 +227,7 @@ async def admin_controls(message: Message):
             return
         asyncio.create_task(broadcast_to_lobby(
             ADMIN_ID, bot.send_message,
-            text=f"📢 <b>ADMIN ANNOUNCEMENT</b>\n━━━━━━━━━━━━━━━━━━\n{parts[1]}"
+            text=f"📢 <b>ADMIN ANNOUNCEMENT</b>\n━━━━━━━━━━━━━━━━━━\n{html.escape(parts[1])}"
         ))
         await message.reply("✅ Broadcast started in background.")
 
@@ -235,7 +235,7 @@ async def admin_controls(message: Message):
         if len(parts) < 2:
             return
         async def send_and_pin(chat_id: int, text: str):
-            msg = await bot.send_message(chat_id, f"📌 <b>PINNED LINK</b>\n━━━━━━━━━━━━━━━━━━\n{text}")
+            msg = await bot.send_message(chat_id, f"📌 <b>PINNED LINK</b>\n━━━━━━━━━━━━━━━━━━\n{html.escape(text)}")
             await bot.pin_chat_message(chat_id, msg.message_id)
 
         asyncio.create_task(broadcast_to_lobby(ADMIN_ID, send_and_pin, text=parts[1]))
@@ -256,8 +256,6 @@ async def start_info(message: Message):
     ])
     welcome_text = (
         f"👋 <b>Welcome to the Media Lobby, {u_data['alias']}!</b>\n\n"
-        f"⚠️ <b>WARNING:</b> Agar aap <b>24 hours</b> ke andar kuch bhi send nahi karenge, "
-        f"toh bot aapko automatically <b>block</b> kar dega!\n\n"
         f"Drop Text, Photo, or Video to broadcast instantly."
     )
     try:
@@ -300,10 +298,7 @@ async def button_handler(call: CallbackQuery):
             [InlineKeyboardButton(text="📊 My Profile", callback_data="my_profile"),
              InlineKeyboardButton(text="🌐 Lobby Stats", callback_data="lobby_stats")]
         ])
-        text = (
-            f"👋 <b>Welcome back, {u_data['alias']}!</b>\n\n"
-            f"⚠️ <b>WARNING:</b> 24 hours tak inactive rehne par bot aapko block kar dega."
-        )
+        text = f"👋 <b>Welcome back, {u_data['alias']}!</b>\n\nChoose an option below."
         if call.message.photo:
             await call.message.edit_caption(caption=text, reply_markup=kb)
         else:
@@ -323,7 +318,6 @@ async def handle_media(message: Message):
     if user["banned"]:
         return
 
-    # --- Update DB & Gamification ---
     level_up, new_level = await update_user_activity(user_id_str)
     if level_up:
         try:
@@ -338,14 +332,14 @@ async def handle_media(message: Message):
     # --- 1. TEXT ---
     if message.text:
         await message.reply("✅ <i>Broadcasted.</i>")
-        full_text = f"{header_text}━━━━━━━━━━\n{message.text}"
+        full_text = f"{header_text}━━━━━━━━━━\n{html.escape(message.text)}"
         asyncio.create_task(broadcast_to_lobby(user_id_str, bot.send_message, text=full_text))
         return
 
     # --- 2. PHOTO / VIDEO / ALBUM ---
     is_photo = message.photo is not None
     file_id = message.photo[-1].file_id if is_photo else message.video.file_id
-    raw_caption = message.caption or ""
+    raw_caption = html.escape(message.caption or "")
     group_id = message.media_group_id
 
     if not group_id:
@@ -367,34 +361,9 @@ async def handle_media(message: Message):
             "caption": raw_caption
         })
 
-# ================== 24H INACTIVITY AUTO-BLOCK ==================
-async def check_inactivity():
-    while True:
-        await asyncio.sleep(3600)  # Har 1 ghante baad check
-        limit = time.time() - INACTIVITY_LIMIT_SECONDS
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute(
-                "SELECT user_id FROM users WHERE banned=0 AND user_id!=? AND last_active < ?",
-                (ADMIN_ID, limit)
-            ) as cursor:
-                inactive_users = await cursor.fetchall()
-
-            for (u_id,) in inactive_users:
-                await db.execute("UPDATE users SET banned=1 WHERE user_id=?", (u_id,))
-                try:
-                    await bot.send_message(
-                        int(u_id),
-                        "🚫 <b>You have been blocked!</b>\nYou didn't send anything for 24 hours."
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(0.1)
-            await db.commit()
-
 # ================== MAIN STARTUP (RAILWAY POLLING) ==================
 async def main():
     await init_db()
-    asyncio.create_task(check_inactivity())
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("🚀 Ultra-Fast Media Lobby Bot is LIVE on Railway!")
     await dp.start_polling(bot)
