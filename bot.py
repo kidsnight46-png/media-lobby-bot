@@ -1,7 +1,6 @@
 import asyncio
 import html
 import logging
-import os
 import random
 import time
 import datetime
@@ -22,9 +21,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = "9164944194:AAFA9tdT6ns1SXaPSxGKCBkhQDDLEcGGpAI"
 DB_FILE = "/data/lobby.db"
 ADMIN_ID = "8633391285"
-ADMIN_CHANNEL_ID = -1004358547046  # <-- YAHAN APNE ADMIN CHANNEL KI ID LAGAYEIN
 WELCOME_IMAGE = "https://files.catbox.moe/z5a53h.jpg"
-REQUIRED_VERIFY_MEDIA = 5
 
 NAME_EMOJIS = ["🦊", "🐯", "🐶", "🐼", "🦁", "🐰", "🦄", "🐉", "🦉", "🐙", "🦅", "🐺"]
 
@@ -36,7 +33,6 @@ ALBUMS = {}
 
 # ================== ULTRA-FAST ASYNC SQLITE (WAL MODE) ==================
 async def init_db():
-    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA synchronous=NORMAL;")
@@ -49,25 +45,7 @@ async def init_db():
                             banned INTEGER DEFAULT 0,
                             last_active REAL,
                             streak_count INTEGER DEFAULT 0,
-                            last_active_date TEXT DEFAULT '',
-                            approved INTEGER DEFAULT 0
-                        )''')
-        # Purane users ke liye automatic migration (sab purane users approved rahenge)
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 1")
-        except Exception:
-            pass
-
-        # Admin ko hamesha approved rakhein
-        await db.execute("UPDATE users SET approved=1 WHERE user_id=?", (ADMIN_ID,))
-
-        # Pending verification media table
-        await db.execute('''CREATE TABLE IF NOT EXISTS pending_media (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id TEXT,
-                            file_id TEXT,
-                            media_type TEXT,
-                            caption TEXT
+                            last_active_date TEXT DEFAULT ''
                         )''')
         await db.commit()
     logging.info("Async SQLite Database (WAL Mode) Initialized.")
@@ -80,7 +58,7 @@ async def ensure_user(user_id_str: str, first_name: str):
     safe_name = html.escape(first_name or "Anonymous")
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
-            "SELECT alias, media_count, level, honor, banned, streak_count, last_active_date, approved FROM users WHERE user_id=?",
+            "SELECT alias, media_count, level, honor, banned, streak_count, last_active_date FROM users WHERE user_id=?",
             (user_id_str,)
         ) as cursor:
             user = await cursor.fetchone()
@@ -88,23 +66,21 @@ async def ensure_user(user_id_str: str, first_name: str):
         if not user:
             alias = f"{random.choice(NAME_EMOJIS)} {safe_name}"
             current_time = time.time()
-            is_approved = 1 if user_id_str == ADMIN_ID else 0
             await db.execute(
-                "INSERT INTO users (user_id, alias, media_count, level, honor, banned, last_active, approved) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (user_id_str, alias, 0, 1, "Beginner 🔰", 0, current_time, is_approved)
+                "INSERT INTO users (user_id, alias, media_count, level, honor, banned, last_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id_str, alias, 0, 1, "Beginner 🔰", 0, current_time)
             )
             await db.commit()
-            user = (alias, 0, 1, "Beginner 🔰", 0, 0, "", is_approved)
-            logging.info(f"New User Registered: {alias} (Approved: {is_approved})")
+            user = (alias, 0, 1, "Beginner 🔰", 0, 0, "")
+            logging.info(f"New User Registered: {alias}")
 
     return {
         "alias": html.escape(user[0]), "media_count": user[1], "level": user[2],
         "honor": user[3], "banned": bool(user[4]),
-        "streak_count": user[5], "last_active_date": user[6],
-        "approved": bool(user[7])
+        "streak_count": user[5], "last_active_date": user[6]
     }
 
-async def update_user_activity(user_id_str: str, increment: int = 1):
+async def update_user_activity(user_id_str: str):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
             "SELECT media_count, level, streak_count, last_active_date FROM users WHERE user_id=?",
@@ -115,8 +91,7 @@ async def update_user_activity(user_id_str: str, increment: int = 1):
         if not user:
             return False, 1
 
-        old_count = user[0]
-        new_count = old_count + increment
+        new_count = user[0] + 1
         new_level = user[1]
         streak_count = user[2]
         last_date_str = user[3]
@@ -130,7 +105,7 @@ async def update_user_activity(user_id_str: str, increment: int = 1):
             streak_count = 1
 
         level_up = False
-        if (new_count // 100) > (old_count // 100):
+        if new_count % 100 == 0:
             new_level += 1
             level_up = True
 
@@ -146,13 +121,11 @@ async def get_stats():
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT COUNT(*) FROM users") as c:
             total = (await c.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE banned=0 AND approved=1") as c:
+        async with db.execute("SELECT COUNT(*) FROM users WHERE banned=0") as c:
             active = (await c.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE banned=0 AND approved=0") as c:
-            pending = (await c.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM users WHERE banned=1") as c:
             banned = (await c.fetchone())[0]
-    return total, active, pending, banned
+    return total, active, banned
 
 async def admin_action(user_id_str: str, action: str):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -174,6 +147,7 @@ async def safe_send(chat_id: int, func, **kwargs):
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after)
             except (TelegramForbiddenError, TelegramBadRequest):
+                # Kisi bhi error par user ko ban nahi karega, sirf skip kar dega
                 break
             except Exception as e:
                 logging.error(f"Send Error ({chat_id}): {e}")
@@ -181,7 +155,7 @@ async def safe_send(chat_id: int, func, **kwargs):
 
 async def broadcast_to_lobby(sender_id_str: str, func, **kwargs):
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT user_id FROM users WHERE banned=0 AND approved=1") as cursor:
+        async with db.execute("SELECT user_id FROM users WHERE banned=0") as cursor:
             users_list = await cursor.fetchall()
 
     tasks = []
@@ -225,10 +199,10 @@ async def admin_controls(message: Message):
     command = parts[0].lower()
 
     if command == "/users":
-        t, a, p, b = await get_stats()
+        t, a, b = await get_stats()
         text = (
             f"📊 <b>BOT STATISTICS</b>\n━━━━━━━━━━━━━━━━━━\n"
-            f"👥 Total Users: {t}\n✅ Active (Approved): {a}\n⏳ Pending: {p}\n🚫 Banned: {b}\n━━━━━━━━━━━━━━━━━━"
+            f"👥 Total Users: {t}\n✅ Active: {a}\n🚫 Banned: {b}\n━━━━━━━━━━━━━━━━━━"
         )
         return await message.reply(text)
 
@@ -276,31 +250,6 @@ async def start_info(message: Message):
     if u_data["banned"]:
         return await message.answer("❌ You are blocked from this lobby.")
 
-    if not u_data["approved"]:
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT COUNT(*) FROM pending_media WHERE user_id=?", (user_id_str,)) as c:
-                count = (await c.fetchone())[0]
-
-        remaining = max(0, REQUIRED_VERIFY_MEDIA - count)
-        if remaining == 0:
-            welcome_text = (
-                f"👋 <b>Welcome, {u_data['alias']}!</b>\n\n"
-                f"⏳ Aapki <b>5 photos/videos</b> Admin review ke liye ja chuki hain.\n"
-                f"Approve hote hi aapko Lobby mein add kar diya jayega."
-            )
-        else:
-            welcome_text = (
-                f"👋 <b>Welcome to the Media Lobby, {u_data['alias']}!</b>\n\n"
-                f"🔐 <b>Verification Required:</b>\n"
-                f"Lobby join karne ke liye pehle <b>{remaining} photos ya videos</b> yahan bhejein.\n"
-                f"Admin approve karte hi aap Lobby mein shamil ho jayenge!"
-            )
-        try:
-            await message.answer_photo(WELCOME_IMAGE, caption=welcome_text)
-        except Exception:
-            await message.answer(welcome_text)
-        return
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 My Profile", callback_data="my_profile"),
          InlineKeyboardButton(text="🌐 Lobby Stats", callback_data="lobby_stats")]
@@ -314,70 +263,9 @@ async def start_info(message: Message):
     except Exception:
         await message.answer(welcome_text, reply_markup=kb)
 
-# ================== INLINE BUTTONS (ADMIN CHANNEL + LOBBY) ==================
+# ================== INLINE BUTTONS ==================
 @dp.callback_query()
 async def button_handler(call: CallbackQuery):
-    # --- ADMIN CHANNEL APPROVE / REJECT ---
-    if call.data.startswith("approve_") or call.data.startswith("reject_"):
-        action, target_id = call.data.split("_", 1)
-
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT alias, honor, level, streak_count FROM users WHERE user_id=?", (target_id,)) as c:
-                user_row = await c.fetchone()
-            async with db.execute("SELECT file_id, media_type, caption FROM pending_media WHERE user_id=? ORDER BY id ASC", (target_id,)) as c:
-                media_rows = await c.fetchall()
-
-            if action == "approve":
-                await db.execute("UPDATE users SET approved=1, last_active=? WHERE user_id=?", (time.time(), target_id))
-                await db.execute("DELETE FROM pending_media WHERE user_id=?", (target_id,))
-                await db.commit()
-
-                # User ki 5 files lobby mein broadcast karein
-                if media_rows and user_row:
-                    alias, honor, level, streak = user_row
-                    await update_user_activity(target_id, increment=len(media_rows))
-                    header_text = f"<b>{html.escape(alias)}</b>\n🎖 <i>{honor} (Lvl {level})</i>\n"
-
-                    media_group = []
-                    for i, (f_id, m_type, cap) in enumerate(media_rows[:10]):
-                        caption = f"{header_text}\n{cap}" if (i == 0 and cap) else (header_text if i == 0 else "")
-                        if m_type == "photo":
-                            media_group.append(InputMediaPhoto(media=f_id, caption=caption))
-                        else:
-                            media_group.append(InputMediaVideo(media=f_id, caption=caption))
-
-                    asyncio.create_task(broadcast_to_lobby(target_id, bot.send_media_group, media=media_group))
-
-                try:
-                    await bot.send_message(
-                        int(target_id),
-                        "🎉 <b>Mubarak ho! Admin ne aapko APPROVE kar diya hai.</b>\n\n"
-                        "Aapki bheji hui files Lobby mein share ho gayi hain aur ab aap Lobby ka hissa hain! "
-                        "Ab aap koi bhi Text, Photo ya Video bhej sakte hain."
-                    )
-                except Exception:
-                    pass
-
-                await call.message.edit_text(f"{call.message.html_text}\n\n✅ <b>STATUS: APPROVED & BROADCASTED</b>")
-                return await call.answer("✅ User Approved!", show_alert=True)
-
-            elif action == "reject":
-                await db.execute("DELETE FROM pending_media WHERE user_id=?", (target_id,))
-                await db.commit()
-
-                try:
-                    await bot.send_message(
-                        int(target_id),
-                        "❌ <b>Aapki verification REJECT ho gayi hai.</b>\n\n"
-                        "Dobara <b>5 sahi photos ya videos</b> bhej kar try karein."
-                    )
-                except Exception:
-                    pass
-
-                await call.message.edit_text(f"{call.message.html_text}\n\n❌ <b>STATUS: REJECTED</b>")
-                return await call.answer("❌ User Rejected!", show_alert=True)
-
-    # --- NORMAL USER BUTTONS ---
     user_id_str = str(call.from_user.id)
     u_data = await ensure_user(user_id_str, call.from_user.first_name or "Anonymous")
     if u_data["banned"]:
@@ -399,7 +287,7 @@ async def button_handler(call: CallbackQuery):
         else:
             await call.message.edit_text(text, reply_markup=back_kb)
     elif call.data == "lobby_stats":
-        t, a, p, b = await get_stats()
+        t, a, b = await get_stats()
         text = f"🌐 <b>Live Lobby Stats</b>\n━━━━━━━━━━━━━━━━━━\n👥 <b>Active Users:</b> {a}\n━━━━━━━━━━━━━━━━━━"
         if call.message.photo:
             await call.message.edit_caption(caption=text, reply_markup=back_kb)
@@ -421,8 +309,6 @@ async def button_handler(call: CallbackQuery):
 # ================== MAIN LOBBY HANDLER ==================
 @dp.message(F.content_type.in_({"text", "photo", "video"}))
 async def handle_media(message: Message):
-    if message.chat.type != "private":
-        return
     if message.text and message.text.startswith('/'):
         return
 
@@ -432,72 +318,6 @@ async def handle_media(message: Message):
     if user["banned"]:
         return
 
-    # --- UNAPPROVED NEW USER VERIFICATION FLOW ---
-    if not user["approved"]:
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT COUNT(*) FROM pending_media WHERE user_id=?", (user_id_str,)) as c:
-                current_count = (await c.fetchone())[0]
-
-            if current_count >= REQUIRED_VERIFY_MEDIA:
-                return await message.reply("⏳ Aapki 5 files pehle hi Admin review ke liye ja chuki hain. Approval ka intezar karein.")
-
-            if message.text:
-                rem = REQUIRED_VERIFY_MEDIA - current_count
-                return await message.reply(f"⚠️ Verification ke liye sirf <b>Photos ya Videos</b> bhejein ({rem} baqi hain).")
-
-            is_photo = message.photo is not None
-            file_id = message.photo[-1].file_id if is_photo else message.video.file_id
-            m_type = "photo" if is_photo else "video"
-            raw_caption = html.escape(message.caption or "")
-
-            await db.execute(
-                "INSERT INTO pending_media (user_id, file_id, media_type, caption) VALUES (?, ?, ?, ?)",
-                (user_id_str, file_id, m_type, raw_caption)
-            )
-            await db.commit()
-            new_count = current_count + 1
-
-            if new_count < REQUIRED_VERIFY_MEDIA:
-                return await message.reply(f"✅ <b>{new_count}/{REQUIRED_VERIFY_MEDIA}</b> received! Baqi <b>{REQUIRED_VERIFY_MEDIA - new_count}</b> photos ya videos bhejein.")
-
-            # 5 files complete -> Admin Channel mein bhejein
-            async with db.execute("SELECT file_id, media_type, caption FROM pending_media WHERE user_id=? ORDER BY id ASC", (user_id_str,)) as c:
-                all_media = await c.fetchall()
-
-        media_group = []
-        for i, (f_id, mt, cap) in enumerate(all_media):
-            if mt == "photo":
-                media_group.append(InputMediaPhoto(media=f_id, caption=cap if i == 0 else ""))
-            else:
-                media_group.append(InputMediaVideo(media=f_id, caption=cap if i == 0 else ""))
-
-        review_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Approve", callback_data=f"approve_{user_id_str}"),
-                InlineKeyboardButton(text="❌ Reject", callback_data=f"reject_{user_id_str}")
-            ]
-        ])
-
-        try:
-            await bot.send_media_group(chat_id=ADMIN_CHANNEL_ID, media=media_group)
-            await bot.send_message(
-                chat_id=ADMIN_CHANNEL_ID,
-                text=(
-                    f"🆕 <b>NEW USER VERIFICATION</b>\n━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 <b>Alias:</b> {user['alias']}\n"
-                    f"🆔 <b>User ID:</b> <code>{user_id_str}</code>\n"
-                    f"📦 <b>Files:</b> {len(all_media)} Media\n━━━━━━━━━━━━━━━━━━\n"
-                    f"Approve ya Reject select karein:"
-                ),
-                reply_markup=review_kb
-            )
-            await message.reply("✅ <b>5/5 files mil gayi hain!</b>\nAapki request Admin review ke liye bhej di gayi hai. Approve hote hi aap Lobby mein shamil ho jayenge.")
-        except Exception as e:
-            logging.error(f"Admin Channel Send Error: {e}")
-            await message.reply("⚠️ Admin channel mein bhejne mein masla aaya. Thori der baad try karein.")
-        return
-
-    # --- APPROVED USER NORMAL LOBBY FLOW ---
     level_up, new_level = await update_user_activity(user_id_str)
     if level_up:
         try:
