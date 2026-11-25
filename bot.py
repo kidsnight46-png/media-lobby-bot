@@ -19,7 +19,7 @@ from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, Teleg
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ================== CONFIGURATION ==================
-BOT_TOKEN = "9194225666:AAGEB4uV2T9pOGq0cvMmEXgTpPqEIbA8rGM"
+BOT_TOKEN = "9164944194:AAFA9tdT6ns1SXaPSxGKCBkhQDDLEcGGpAI"
 DB_FILE = "/data/lobby.db"
 ADMIN_ID = "8633391285"
 ADMIN_CHANNEL_ID = --1004358547046  # <-- YAHAN APNE ADMIN CHANNEL KI ID LAGAYEIN
